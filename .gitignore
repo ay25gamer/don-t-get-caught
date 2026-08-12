@@ -1,0 +1,11 @@
+# Rojo build/sync artifacts
+sourcemap.json
+*.rbxlx.lock
+*.rbxl.lock
+
+# Editor
+.vscode/*.log
+
+# OS
+Thumbs.db
+.DS_Store

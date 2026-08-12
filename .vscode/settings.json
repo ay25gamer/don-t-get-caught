@@ -1,0 +1,10 @@
+{
+  "luau-lsp.sourcemap.enabled": true,
+  "luau-lsp.sourcemap.rojoProjectFile": "default.project.json",
+  "luau-lsp.require.mode": "relativeToWorkspaceRoot",
+  "luau-lsp.types.roblox": true,
+  "rojo.projectFilePath": "default.project.json",
+  "files.associations": {
+    "*.luau": "luau"
+  }
+}
