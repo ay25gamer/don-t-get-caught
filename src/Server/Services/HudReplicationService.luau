@@ -54,6 +54,11 @@ local SETTING_VALIDATORS: { [string]: (value: unknown) -> boolean } = {
 }
 
 local HudReplicationService = {}
+-- Match-only — every remote this service relays (round/eating/guard/suspicion state, profile
+-- snapshots, settings) is only ever consumed by HudController, which is itself Match-only (see
+-- ServerMode.luau). Left ungated, this fired ProfileSnapshot at every player once a second
+-- forever with nobody listening on a Hub server, backing up the remote's queue indefinitely.
+HudReplicationService.Modes = { "Match" }
 
 local function onPhaseChanged(newPhase: string, _oldPhase: string)
 	RoundStateChangedEvent:FireAllClients(newPhase, 0)

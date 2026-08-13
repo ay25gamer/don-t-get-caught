@@ -195,10 +195,14 @@ local function onRequestBite(player: Player, modeValue: unknown)
 	-- The client only ever ASKS for "Safe" or "Fast" — never a numeric interval/noise value.
 	-- Anything else is either a bug in a legitimate client (which only ever sends one of these
 	-- two) or a modified one; either way, there is nothing safe to fall back to, so just drop it.
-	if modeValue ~= "Safe" and modeValue ~= "Fast" then
+	local mode: EatingMode
+	if modeValue == "Safe" then
+		mode = "Safe"
+	elseif modeValue == "Fast" then
+		mode = "Fast"
+	else
 		return
 	end
-	local mode = modeValue :: EatingMode
 
 	local seatModel = SeatingService:GetSeatForPlayer(player)
 	if not seatModel then

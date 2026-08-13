@@ -310,7 +310,7 @@ local function refreshSuspicionTier()
 		return
 	end
 	local oldTier = self._suspicionTier
-	self._suspicionTier = newTier
+	self._suspicionTier = newTier :: SuspicionTier
 	self.SuspicionTierChanged:Fire(newTier, oldTier)
 end
 
