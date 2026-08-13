@@ -70,4 +70,47 @@ function Widgets.NewTextBox(name: string, parent: Instance, placeholderText: str
 	return textBox
 end
 
+--[[
+	Adds a UIScale under `target` that shrinks target's whole subtree so it never renders
+	larger than the room actually available, per `getAvailableSize()` — but never scales UP
+	past 1, so on anything already big enough (every PC resolution this UI was laid out and
+	tested at) the result is Scale == 1: pixel-identical to before this existed. Every
+	Position/Size already inside target's subtree is left completely untouched — UIScale
+	scales the whole rendered subtree uniformly, so all existing relative (scale, offset) math
+	in there keeps working exactly as designed, just smaller on a small screen instead of
+	spilling off it.
+
+	`contentSize` is target's real, unscaled footprint at Scale 1 — the same fixed offsets
+	already used to build it, not invented.
+
+	`getAvailableSize`/`resizeSignal` are supplied by the caller rather than assumed, because
+	what "available" means differs by target: the real screen for a free-floating panel, or a
+	stable ANCESTOR's size for a row nested inside an already-responsive container. Deliberately
+	never target's own AbsoluteSize — per Roblox's docs, a UIScale multiplies the AbsoluteSize of
+	the object it's parented to, so using target's own (post-scale) AbsoluteSize as the
+	denominator here would feed back into itself and shrink toward zero on every resize.
+]]
+function Widgets.FitToAvailableSpace(
+	target: GuiObject,
+	contentSize: Vector2,
+	getAvailableSize: () -> Vector2,
+	resizeSignal: RBXScriptSignal
+): UIScale
+	local uiScale = Instance.new("UIScale")
+	uiScale.Parent = target
+
+	local function update()
+		local available = getAvailableSize()
+		if available.X <= 0 or available.Y <= 0 then
+			return
+		end
+		uiScale.Scale = math.min(1, available.X / contentSize.X, available.Y / contentSize.Y)
+	end
+
+	update()
+	resizeSignal:Connect(update)
+
+	return uiScale
+end
+
 return Widgets

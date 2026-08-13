@@ -8,7 +8,11 @@
 
 	Three ways an item becomes ownable:
 	  Price == 0 or Level >= UnlockLevel  -> auto-granted (syncAutoUnlocks), on profile load and
-	                                          on RewardService.LevelUp
+	                                          on Shared.Progression.LevelUp (fired by every
+	                                          XP-granting system — see that file's doc — not just
+	                                          RewardService, so a level crossed via a daily
+	                                          mission unlocks just as reliably as one crossed by
+	                                          winning a round)
 	  Price > 0                            -> PurchaseCosmetic, Gold deducted server-side
 	  GamePassId set                       -> never granted here; MonetizationService caches
 	                                          real ownership into OwnedGamepasses, checked at
@@ -32,7 +36,6 @@ local MonetizationIds = Shared.MonetizationIds
 local CosmeticCatalog = require(ReplicatedStorage.Shared.Data.CosmeticCatalog)
 type CosmeticItem = typeof(CosmeticCatalog[1])
 
-local RewardService = require(script.Parent.RewardService)
 local PlayerDataService = require(script.Parent.PlayerDataService)
 
 type PlayerProfileData = PlayerDataService.PlayerProfileData
@@ -198,7 +201,7 @@ end
 
 function ShopService.Start()
 	PlayerDataService.ProfileLoaded:Connect(onProfileLoaded)
-	RewardService.LevelUp:Connect(onLevelUp)
+	Shared.Progression.LevelUp:Connect(onLevelUp)
 	PurchaseCosmeticEvent.OnServerEvent:Connect(onPurchaseCosmetic)
 	EquipCosmeticEvent.OnServerEvent:Connect(onEquipCosmetic)
 	Players.PlayerRemoving:Connect(onPlayerRemoving)

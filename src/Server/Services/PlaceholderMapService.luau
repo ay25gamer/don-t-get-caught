@@ -182,10 +182,12 @@ local function guardCFrame(): CFrame
 	return CFrame.lookAt(guardPosition, Vector3.new(0, SEAT_HEIGHT, 0))
 end
 
+-- Purely a visual/positional marker for whoever builds the real map later — nothing reads this
+-- back at runtime (the guard itself is found by fixed path, not by tag; see GameConstants.Tags'
+-- doc comment), so it's untagged on purpose.
 local function buildGuardSpot(parent: Instance, facingCFrame: CFrame)
 	local marker = newPart("GuardSpot", Vector3.new(2, 1, 2), facingCFrame, Color3.fromRGB(20, 20, 20), parent, false)
 	marker.Transparency = 0.5
-	CollectionService:AddTag(marker, Constants.Tags.GuardSpot)
 end
 
 local GUARD_TORSO_SIZE = Vector3.new(2, 3, 1)

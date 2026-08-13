@@ -12,6 +12,12 @@
 
 	Paced with RunService.Heartbeat (not a `while wait()` loop) so it costs nothing while the
 	button isn't held.
+
+	Eating Speed (Safe/Fast): SetFastModeEnabled (called by HudController's toggle button) is
+	the ONLY thing this controller decides about speed — which of the two fixed paces to send
+	RequestBite at, and which mode name to claim. Every real number behind either mode (the
+	actual interval, the actual noise) lives entirely in EatingService; this controller has no
+	idea what either number is, same "client is dumb" principle as everything else here.
 ]]
 
 local UserInputService = game:GetService("UserInputService")
@@ -32,6 +38,7 @@ EatingController.Modes = { "Match" }
 local self = setmetatable({
 	_holding = false,
 	_lastAttemptClock = 0,
+	_fastModeEnabled = false,
 }, EatingController)
 
 -- Colon-sugar methods would type their implicit `self` from the empty class table, not the
@@ -62,13 +69,23 @@ local function onHeartbeat()
 		return
 	end
 
+	-- Only paces how OFTEN this client bothers to ask — EatingService enforces the real
+	-- interval for whichever mode is actually claimed independently, so this is purely "don't
+	-- fire the remote needlessly," not a security boundary (see EatingService.luau's file doc).
+	local pace = if self._fastModeEnabled then Constants.Eating.FastBiteInterval else Constants.Eating.BiteInterval
+
 	local now = os.clock()
-	if now - self._lastAttemptClock < Constants.Eating.BiteInterval then
+	if now - self._lastAttemptClock < pace then
 		return
 	end
 
 	self._lastAttemptClock = now
-	RequestBiteEvent:FireServer()
+	RequestBiteEvent:FireServer(if self._fastModeEnabled then "Fast" else "Safe")
+end
+
+-- Called by HudController's Fast Eating toggle button — the only entry point for changing this.
+function EatingController.SetFastModeEnabled(self: Self, enabled: boolean)
+	self._fastModeEnabled = enabled
 end
 
 function EatingController.Start(self: Self)

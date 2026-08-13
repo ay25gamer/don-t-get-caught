@@ -202,10 +202,18 @@ local function onClaimMission(player: Player, missionIdValue: unknown)
 
 	progress.Claimed = true
 	local gold = Shared.Progression.GrantGold(data, Constants.DailyMissions.RewardGold)
-	local xp = Shared.Progression.GrantXP(data, Constants.DailyMissions.RewardXP)
+	local xp, levelsGained = Shared.Progression.GrantXP(data, Constants.DailyMissions.RewardXP)
 
 	Logger:Info(("%s claimed mission '%s': +%d gold, +%d XP."):format(player.Name, mission.Name, gold, xp))
 	pushDailyState(player, data)
+
+	-- Same canonical notification RewardService fires on a round-win level-up (see
+	-- Shared/Util/Progression.luau) — without this, a level crossed purely via a mission's XP
+	-- would update data.Level correctly but never re-sync ShopService's level-gated cosmetic
+	-- unlocks until the player's next round win or reconnect.
+	if levelsGained > 0 then
+		Shared.Progression.LevelUp:Fire(player, data.Level)
+	end
 end
 
 local function onProfileLoaded(player: Player, _profile: unknown)

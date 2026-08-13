@@ -13,7 +13,18 @@
 	A player who disconnects mid-round already had their ProfileStore session ended by
 	PlayerDataService (see its PlayerRemoving handler) by the time anything here runs for them,
 	so every write goes through PlayerDataService:GetData() and silently skips players whose
-	data isn't available anymore instead of erroring.
+	data isn't available anymore instead of erroring. This is also why a player who merely
+	disconnects (never actually caught) never receives the elimination consolation reward below
+	— RoundService deliberately never fires PlayerEliminated for a disconnect (see its file doc),
+	so onPlayerEliminated simply never runs for them.
+
+	Elimination consolation: a small, one-time-per-round Gold/XP payout on getting caught, so an
+	early elimination doesn't feel like a totally wasted round — see Constants.Rewards.
+	EliminationConsolationGold/XP for the actual amounts and why they're deliberately small.
+	_consolationGranted (reset every RoundStarted, same lifecycle as RevivalService's
+	_revivesThisRound) is what stops a player who gets caught, revived, and caught again in the
+	same round from receiving it twice — it's granted on the FIRST elimination of the round only,
+	never again until the next round starts.
 ]]
 
 local Debris = game:GetService("Debris")
@@ -33,8 +44,9 @@ RewardService.Modes = { "Match" }
 
 local self = setmetatable({
 	_roundStartClock = 0,
-	-- (player: Player, newLevel: number) -- fired whenever GrantXP() crosses a level threshold
-	LevelUp = Shared.Signal.new(),
+	-- Which players have already received their one-time elimination consolation reward THIS
+	-- round — see the file doc. Reset in onRoundStarted.
+	_consolationGranted = {} :: { [Player]: boolean },
 }, RewardService)
 
 -- Colon-sugar methods would type their implicit `self` from the empty class table, not the
@@ -62,6 +74,7 @@ end
 
 local function onRoundStarted(participants: { Player })
 	self._roundStartClock = os.clock()
+	table.clear(self._consolationGranted)
 	for _, player in ipairs(participants) do
 		local data = PlayerDataService:GetData(player)
 		if data then
@@ -81,6 +94,20 @@ local function onPlayerEliminated(player: Player, _remainingAliveCount: number)
 
 	local survivedSeconds = os.clock() - self._roundStartClock
 	data.Statistics.LongestSurvivalSeconds = math.max(data.Statistics.LongestSurvivalSeconds, survivedSeconds)
+
+	if not self._consolationGranted[player] then
+		self._consolationGranted[player] = true
+
+		local goldGranted = Shared.Progression.GrantGold(data, Constants.Rewards.EliminationConsolationGold)
+		local xpGranted, levelsGained = Shared.Progression.GrantXP(data, Constants.Rewards.EliminationConsolationXP)
+
+		Logger:Info(("%s was caught — consolation +%d gold, +%d XP."):format(player.Name, goldGranted, xpGranted))
+
+		-- Same canonical notification as a round-win level-up — see Shared/Util/Progression.luau.
+		if levelsGained > 0 then
+			Shared.Progression.LevelUp:Fire(player, data.Level)
+		end
+	end
 end
 
 local function onRoundEnded(winner: Player?)
@@ -112,8 +139,10 @@ local function onRoundEnded(winner: Player?)
 	)
 	celebrateWinner(winner)
 
+	-- See Shared/Util/Progression.luau's file doc — this is the single canonical "leveled up"
+	-- notification; DailyService fires the same signal from its own GrantXP call site.
 	if levelsGained > 0 then
-		self.LevelUp:Fire(winner, data.Level)
+		Shared.Progression.LevelUp:Fire(winner, data.Level)
 	end
 end
 

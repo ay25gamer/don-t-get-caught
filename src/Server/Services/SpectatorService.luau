@@ -40,7 +40,13 @@ local function onPlayerRevived(player: Player)
 end
 
 local function onPhaseChanged(newPhase: string, _oldPhase: string)
-	if newPhase == "Lobby" then
+	-- Fires at "Ended" (the round just concluded), not only "Lobby" 8s later — a spectating
+	-- client whose _aliveRoster had gone empty (their last watchable target was just
+	-- eliminated) would otherwise sit with a frozen camera and Scriptable control for the
+	-- entire Ended-hold, with nothing telling it to reset until Lobby finally arrived. Also
+	-- still fires on "Lobby" itself (harmless if already reset at Ended) so nothing regresses
+	-- for whatever path a round ends through.
+	if newPhase == "Ended" or newPhase == "Lobby" then
 		SpectateResetEvent:FireAllClients()
 	end
 end

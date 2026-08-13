@@ -23,8 +23,12 @@ export type RemoteEventName = string
 export type RemoteFunctionName = string
 
 local RemoteEventDefinitions: { RemoteEventName } = {
-	-- Client -> Server, no payload: "I attempted a bite right now." EatingService derives
-	-- everything else (who, whether it counts, how much noise it makes) server-side.
+	-- Client -> Server: (mode: string, one of "Safe"/"Fast" — Shared.Types.EatingMode). "I
+	-- attempted a bite right now, at this requested speed." The mode is the ONLY thing the
+	-- client supplies about speed — EatingService alone maps it to a real interval/noise cost,
+	-- decides whether this specific attempt counts, and re-derives everything else (who, which
+	-- seat, current food state) server-side. A client claiming an unrecognized mode value is
+	-- simply ignored, same as any other malformed input.
 	"RequestBite",
 
 	-- Server -> all clients, fired on RoundService.RoundStarted with the participant list, so
@@ -47,6 +51,22 @@ local RemoteEventDefinitions: { RemoteEventName } = {
 	-- only meaningful during "Intermission" (the countdown); HudController ignores it
 	-- otherwise and just runs its own local stopwatch for "time in round" display.
 	"RoundStateChanged",
+	-- Server -> all clients: (state: string, one of "Reading"/"Looking"). Broadcast (not
+	-- per-player) because it isn't private data — every seated player needs it to know when
+	-- eating is actually dangerous, and by design nothing about a seat's default camera
+	-- orientation guarantees the guard's newspaper is even in view (see GuardService.luau).
+	-- Not the same thing as Suspicion, which stays server-only on purpose — this only ever
+	-- reveals the two states already visible in the 3D world (Newspaper up/down), just
+	-- reliably, instead of leaving it to chance whether a player's camera happens to be
+	-- pointed at the guard.
+	"GuardStateChanged",
+	-- Server -> all clients: (tier: string, one of "Calm"/"Rising"/"High" —
+	-- Shared.Types.SuspicionTier). Broadcast, same as GuardStateChanged, and same reasoning:
+	-- every seated player benefits from knowing the guard is getting more attentive. The real
+	-- 0-100 Suspicion number never leaves GuardService — this is deliberately the coarsest
+	-- signal that can still convey "calm -> getting risky -> very risky." Only fired when the
+	-- tier actually changes, never on a fixed interval or every Heartbeat.
+	"SuspicionTierChanged",
 	-- Server -> owning client only: (foodPercent: number, noise: number). A player's own
 	-- eating/noise state — never broadcast, it isn't anyone else's business.
 	"EatingStateChanged",

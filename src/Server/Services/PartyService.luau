@@ -18,6 +18,7 @@
 	room registry, so RoomReportingService never finds an entry for it and never lists it.
 ]]
 
+local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local DataStoreService = game:GetService("DataStoreService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -30,6 +31,16 @@ local CreatePartyFunction = Shared.Remotes.GetFunction("CreateParty")
 local JoinPartyFunction = Shared.Remotes.GetFunction("JoinParty")
 
 local partyCodesStore = DataStoreService:GetDataStore("PartyCodes")
+
+-- Neither RemoteFunction has a natural cooldown of its own, and both are genuinely expensive to
+-- spam: CreateParty reserves a real server (TeleportService:ReserveServer, itself
+-- platform-quota-limited) and writes a DataStore entry on every single call. A normal client
+-- can't double-fire either — HubController disables its button for the whole in-flight call —
+-- so this only ever matters for a modified client calling InvokeServer() directly in a tight
+-- loop, which could otherwise burn through this experience's shared ReserveServer/DataStore
+-- quota fast enough to start failing OTHER players' legitimate CreateParty/JoinParty calls.
+-- 2s is far above anything a real click-and-wait UI flow could ever hit.
+local partyActionLimiter = Shared.RateLimiter.new(2)
 
 local PartyService = {}
 -- Hub-only — there's no "create a party" concept once you're already in a match.
@@ -53,6 +64,9 @@ local function generateCode(): string
 end
 
 local function onCreateParty(player: Player): (string?, string?, boolean?)
+	if not partyActionLimiter:TryAcquire(player) then
+		return nil, "You're doing that too fast — wait a moment and try again."
+	end
 	-- game.PlaceId is 0 for a place that has never been published to Roblox — ReserveServer
 	-- (and TeleportService generally) cannot work at all against PlaceId 0, and tends to hang
 	-- rather than error cleanly when it can't, so this is checked BEFORE attempting the call
@@ -114,6 +128,9 @@ local function onCreateParty(player: Player): (string?, string?, boolean?)
 end
 
 local function onJoinParty(player: Player, codeValue: unknown): (boolean, string?)
+	if not partyActionLimiter:TryAcquire(player) then
+		return false, "You're doing that too fast — wait a moment and try again."
+	end
 	if typeof(codeValue) ~= "string" or #codeValue == 0 then
 		return false, "Enter a party code first."
 	end
@@ -141,9 +158,14 @@ local function onJoinParty(player: Player, codeValue: unknown): (boolean, string
 	return true, nil
 end
 
+local function onPlayerRemoving(player: Player)
+	partyActionLimiter:Clear(player)
+end
+
 function PartyService.Start()
 	CreatePartyFunction.OnServerInvoke = onCreateParty
 	JoinPartyFunction.OnServerInvoke = onJoinParty
+	Players.PlayerRemoving:Connect(onPlayerRemoving)
 end
 
 return PartyService

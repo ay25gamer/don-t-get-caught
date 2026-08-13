@@ -305,12 +305,35 @@ function SeatingService.Init(self: Self)
 	end
 end
 
+-- Re-applies the correct seating state for `player`'s CURRENT character. seatPlayerUnlocked
+-- deliberately no-ops during InProgress (there's no seat to newly ASSIGN mid-round) — but a
+-- mid-round respawn (e.g. the player using Roblox's built-in "Reset Character") still hands
+-- them a brand-new Humanoid with none of lockAtSeat's WalkSpeed/JumpPower zeroing on it, so
+-- without this check they'd end up free to walk around while RoundService still counts them as
+-- an alive, seated participant. Re-lock them at their EXISTING seat instead — the same
+-- mechanism ReviveSeat uses — but only if they're actually still supposed to be locked in
+-- (still alive; an eliminated/spectating player respawning deliberately stays free, matching
+-- onPlayerEliminated's own unlockMovement).
+local function reseatCharacter(player: Player)
+	if RoundService:GetPhase() == "InProgress" and RoundService:IsPlayerAlive(player) then
+		local seatModel: Model? = self._seatOfPlayer[player]
+		local seatPart = seatModel and getSeatPart(seatModel)
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if seatModel and seatPart and humanoid then
+			lockAtSeat(player, seatModel, seatPart, humanoid)
+		end
+		return
+	end
+	seatPlayerUnlocked(player)
+end
+
 local function onPlayerAdded(player: Player)
 	player.CharacterAdded:Connect(function()
-		seatPlayerUnlocked(player)
+		reseatCharacter(player)
 	end)
 	if player.Character then
-		seatPlayerUnlocked(player)
+		reseatCharacter(player)
 	end
 end
 

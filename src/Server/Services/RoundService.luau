@@ -80,7 +80,10 @@ local function currentPlayerCount(): number
 	return #Players:GetPlayers()
 end
 
-local function transitionTo(newPhase: RoundPhase)
+-- `forcedWinner` lets a caller declare who won BEFORE the usual "exactly one player left
+-- alive" check runs — see PlayerCompletedFood below. Nil (the normal case) falls through to
+-- the original last-survivor detection unchanged.
+local function transitionTo(newPhase: RoundPhase, forcedWinner: Player?)
 	local oldPhase = self._phase
 	self._phase = newPhase
 
@@ -120,8 +123,8 @@ local function transitionTo(newPhase: RoundPhase)
 	elseif newPhase == "Ended" then
 		self._endedDeadline = os.clock() + Constants.Round.EndedDisplayDuration
 
-		local winner: Player? = nil
-		if self._aliveCount == 1 then
+		local winner: Player? = forcedWinner
+		if not winner and self._aliveCount == 1 then
 			for player in pairs(self._alive) do
 				winner = player
 				break
@@ -211,6 +214,30 @@ function RoundService.EliminatePlayer(self: Self, player: Player, reason: string
 	self.PlayerEliminated:Fire(player, self._aliveCount)
 end
 
+-- Server-authoritative "this player finished their plate FIRST" entry point — only
+-- EatingService should call this, and only after it has independently confirmed the player's
+-- food percent reached FullPercent itself (RequestBite carries no payload; the server computes
+-- bite count/food % entirely on its own, so there is nothing here for a client to lie about).
+-- Ends the round immediately with THIS player as the winner, regardless of how many other
+-- players are still alive/eating — "first to finish wins," not just "last one standing wins."
+-- Re-validates its own preconditions rather than trusting the caller, same as
+-- EliminatePlayer/RevivePlayer above: phase must still be InProgress, and the player must
+-- still be alive (covers "still in this round," "not already eliminated," and "not already
+-- caught between their last bite and this call" all at once, since _alive is the single source
+-- of truth for every one of those).
+function RoundService.PlayerCompletedFood(self: Self, player: Player): boolean
+	if self._phase ~= "InProgress" then
+		return false
+	end
+	if not self._alive[player] then
+		return false
+	end
+
+	Logger:Info(("%s finished their plate first — round over!"):format(player.Name))
+	transitionTo("Ended", player)
+	return true
+end
+
 -- Server-authoritative "bring this eliminated player back" entry point — only MonetizationService
 -- (after a verified Instant Revive purchase) should call this. Requires the player to have been
 -- a participant THIS round (see _roster) and not currently alive; returns false otherwise so
@@ -231,6 +258,23 @@ function RoundService.RevivePlayer(self: Self, player: Player): boolean
 	Logger:Info(("%s was revived. %d player(s) remain."):format(player.Name, self._aliveCount))
 	self.PlayerRevived:Fire(player)
 	return true
+end
+
+-- Undoes a RevivePlayer() call that turned out not to be safe to complete — e.g. the player
+-- physically couldn't be re-seated/locked afterward (RevivalService checks this before calling
+-- this). Deliberately NOT EliminatePlayer(): this isn't a new catch, and routing it through
+-- EliminatePlayer would double-count it in RewardService/DailyService's statistics (an extra
+-- "eliminated" for what was actually a revive that never really completed). Silent on purpose —
+-- no signal fired — because the corresponding RevivePlayer() call above already fired
+-- PlayerRevived; only RevivalService should call this, and only immediately afterward, before
+-- anything else has had a chance to act on the player being alive again.
+function RoundService.CancelRevive(self: Self, player: Player)
+	if not self._alive[player] then
+		return
+	end
+	self._alive[player] = nil
+	self._aliveCount -= 1
+	Logger:Warn(("%s's revive could not be completed and was rolled back."):format(player.Name))
 end
 
 -- Called only by HostService, only after it's confirmed the caller is this server's current

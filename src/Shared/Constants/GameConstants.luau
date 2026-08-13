@@ -34,6 +34,19 @@ GameConstants.Guard = {
 	ReadingDurationMax = 10,
 	LookingDurationMin = 1,
 	LookingDurationMax = 2,
+	-- How long after Looking begins detection stays OFF, giving a player a genuine chance to
+	-- stop eating before the guard actually starts checking — see GuardService.luau. Well under
+	-- LookingDurationMin so a real detection window always remains afterward; this is a delay
+	-- on WHEN checks start, never a change to what counts as "still eating."
+	LookingReactionWindow = 0.3,
+
+	-- Second Look: after a NORMAL Looking phase ends, a chance the following Reading is short,
+	-- leading into a quick second glance soon after the first. See GuardService.luau for the
+	-- full state machine and why this structurally can never chain into a third consecutive
+	-- quick look (a mandatory full-length Reading always follows a second look).
+	SecondLookReadingMax = 1.5, -- floor reuses ReadingDurationMin above; only the ceiling shrinks
+	SecondLookBaseChance = 0.05, -- chance to trigger at Suspicion 0 — never truly zero
+	SecondLookMaxChance = 0.35, -- chance to trigger at Suspicion Max — never a guarantee
 }
 
 -- The GUARD's global suspicion meter — invisible to players (see design doc). Distinct from
@@ -44,12 +57,25 @@ GameConstants.Suspicion = {
 	PerEatingPlayerPerSecond = 3, -- passive trickle per currently-eating alive player, per second ("many players eating")
 	PerNoisePoint = 0.5, -- suspicion added per point a player's own noise meter rises ("loud noises" / "rapid bites")
 	ReadingDurationInfluence = 0.7, -- 0-1, how much max suspicion compresses the next Reading duration toward the minimum
+	-- Coarse, qualitative bands the CLIENT is allowed to know about (see SuspicionTierChanged in
+	-- Remotes.luau) — the real 0-100 number itself never leaves the server. A value at or above
+	-- a threshold belongs to that tier.
+	RisingThreshold = 30,
+	HighThreshold = 70,
 }
 
 GameConstants.Eating = {
 	FullPercent = 100,
 	BitesToFinish = 12, -- number of successful bites needed to go from 0% to FullPercent
-	BiteInterval = 0.6, -- seconds; server-enforced minimum time between bites that count toward progress
+	BiteInterval = 0.6, -- seconds; server-enforced minimum time between "Safe" mode bites
+	-- "Fast" mode: exactly half BiteInterval — 12 bites in 3.6s instead of 7.2s. A real edge in
+	-- the "first to finish wins" race (see RoundService:PlayerCompletedFood). Paid for in noise:
+	-- EatingService charges Noise.SpamNoiseMultiplier per Fast bite instead of the normal rate —
+	-- deliberately reusing that existing, already-tuned number rather than inventing a new one,
+	-- since "Fast Eating" is mechanically "always pay the spam-click noise cost, but have it
+	-- actually count." See EatingService.luau for how the mode is requested by the client but
+	-- entirely enforced server-side.
+	FastBiteInterval = 0.3,
 }
 
 GameConstants.Noise = {
@@ -66,6 +92,12 @@ GameConstants.DataStore = {
 GameConstants.Rewards = {
 	WinGold = 50,
 	WinXP = 100,
+	-- A small, one-time-per-round payout for a player who gets caught, so an early elimination
+	-- doesn't feel like a totally wasted round. Deliberately well below WinGold/WinXP (20%/15%)
+	-- so winning always stays clearly better than losing — see RewardService.luau for the
+	-- once-per-round guard (getting revived and caught again doesn't grant this twice).
+	EliminationConsolationGold = 10,
+	EliminationConsolationXP = 15,
 }
 
 GameConstants.Progression = {
@@ -73,11 +105,13 @@ GameConstants.Progression = {
 }
 
 -- CollectionService tag names. Centralized so the system that creates tagged instances (a map
--- builder) and the system(s) that consume them (SeatingService, later GuardService) always
--- agree on the literal string without duplicating it.
+-- builder) and the system(s) that consume them (SeatingService) always agree on the literal
+-- string without duplicating it. The guard itself is a singleton looked up by fixed path
+-- (Workspace.DiningRoom.Guard — see GuardService/PlaceholderMapService), not by tag: unlike
+-- seats, there's only ever one, so a CollectionService tag would add indirection with no real
+-- discovery problem to solve.
 GameConstants.Tags = {
 	DinnerSeat = "DinnerSeat",
-	GuardSpot = "GuardSpot",
 }
 
 GameConstants.Monetization = {

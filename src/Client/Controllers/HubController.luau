@@ -16,6 +16,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = require(ReplicatedStorage:WaitForChild("Shared"))
@@ -71,6 +72,18 @@ function HubController.Start()
 
 	local mainFrame = newFrame("MainFrame", screenGui, UDim2.new(0, 460, 0, 520), UDim2.new(0.5, -230, 0.5, -260), Color3.fromRGB(22, 22, 26))
 	mainFrame.BackgroundTransparency = 0.05
+
+	-- Every child below is already sized/positioned as a scale fraction of mainFrame (e.g.
+	-- "1, -20" widths, "0.65"/"0.35" split inputs) — so scaling mainFrame itself down to fit a
+	-- phone screen (never up, past its actual 460x520 design size) carries every one of those
+	-- proportions with it for free; nothing else in this function needs to change.
+	local camera = Workspace.CurrentCamera
+	if camera then
+		Widgets.FitToAvailableSpace(mainFrame, Vector2.new(460, 520), function()
+			local currentCamera = Workspace.CurrentCamera
+			return if currentCamera then currentCamera.ViewportSize else Vector2.zero
+		end, camera:GetPropertyChangedSignal("ViewportSize"))
+	end
 
 	newLabel("Title", mainFrame, "Don't Get Caught", UDim2.new(1, 0, 0, 40), Enum.TextXAlignment.Center).Position = UDim2.new(0, 0, 0, 10)
 

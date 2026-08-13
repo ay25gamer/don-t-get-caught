@@ -12,6 +12,17 @@
 
 export type GuardState = "Reading" | "Looking"
 
+-- The client's requested eating speed — "Safe" (the original single behavior) or "Fast" (new,
+-- faster progress for more noise). Sent as RequestBite's payload; EatingService is the only
+-- thing that ever decides what either value actually means numerically (interval, noise) — see
+-- its file doc.
+export type EatingMode = "Safe" | "Fast"
+
+-- A coarse, qualitative reading of the guard's private Suspicion meter — the ONLY thing about
+-- Suspicion the client is ever allowed to know (see GuardService.luau and SuspicionTierChanged
+-- in Remotes.luau). Never a number.
+export type SuspicionTier = "Calm" | "Rising" | "High"
+
 export type RoundPhase = "Lobby" | "Intermission" | "InProgress" | "Ended"
 
 -- A live public room, as tracked by PublicRoomService (Hub, in-memory cache) and

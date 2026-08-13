@@ -74,13 +74,30 @@ local function tierForCount(revivesSoFar: number): ReviveTier
 	end
 end
 
+-- Revive requested -> Character/Humanoid available? -> RoundService accepts it? ->
+-- SeatingService can actually re-seat/lock them? Only once ALL of those hold does the player
+-- become alive-and-seated; any failure along the way leaves them exactly as caught as before
+-- (never alive-but-free-to-walk during an InProgress round).
 local function performRevive(player: Player): boolean
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		Logger:Debug(("%s has no Humanoid right now — revive denied, they can try again."):format(player.Name))
+		return false
+	end
+
 	local revived = RoundService:RevivePlayer(player)
 	if not revived then
 		return false
 	end
 
-	SeatingService:ReviveSeat(player)
+	local seated = SeatingService:ReviveSeat(player)
+	if not seated then
+		Logger:Error(("%s's seat could not be restored after revive — rolling back."):format(player.Name))
+		RoundService:CancelRevive(player)
+		return false
+	end
+
 	GuardService:ClearRagdoll(player)
 
 	Logger:Info(("%s was revived and returned to their seat."):format(player.Name))

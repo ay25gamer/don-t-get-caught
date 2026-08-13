@@ -33,6 +33,35 @@
 	PlatformStand'd (a simple, reliable ragdoll placeholder — a proper multi-limb ragdoll is a
 	future polish upgrade), and RoundService:EliminatePlayer() is called. Detection runs
 	entirely server-side; nothing about "am I eating" is ever trusted from the client.
+
+	Reaction window: detection doesn't start checking the INSTANT Looking begins — see
+	Constants.Guard.LookingReactionWindow. This is a delay on when checkForCaughtPlayers starts
+	running each Looking phase, computed and enforced entirely server-side; the client only ever
+	learns "Looking" started (via GuardStateChanged, same moment either way) and reacts on its
+	own, exactly as before. Deliberately well short of LookingDurationMin so a real detection
+	window always follows it — a player is never safe for the WHOLE Looking phase, only briefly
+	at its start.
+
+	Second Look: after a NORMAL Looking phase ends, a chance (see secondLookChance, scaled by
+	current Suspicion but never 0% or 100%) that the following Reading is short
+	(Constants.Guard.SecondLookReadingMax instead of the usual suspicion-scaled range), leading
+	into a quick second glance soon after the first. Tracked with two booleans:
+	  _pendingSecondLookReading — decided the moment a Looking phase ends: should the Reading
+	    we're about to enter be the short setup one?
+	  _currentLookIsSecondLook — carried into a Looking phase from whether the Reading it came
+	    from was that short setup one.
+	The anti-chain rule lives entirely in transitionState's Looking->Reading branch: if the Look
+	that just ended WAS a second look, no roll happens at all — the next Reading is unconditionally
+	full-length. A third consecutive quick look is therefore not just rare, it is structurally
+	impossible: a second look can only ever be followed by a full, normal-duration Reading.
+	The client never receives a timer, a probability, or advance notice of any kind — only the
+	same GuardStateChanged("Looking") it would get for an ordinary Look, at the same moment.
+
+	Suspicion tier (Calm/Rising/High — Shared.Types.SuspicionTier): the ONLY thing about
+	Suspicion ever revealed to clients, and only as one of these three qualitative bands, never
+	the real number — see Constants.Suspicion.RisingThreshold/HighThreshold and
+	SuspicionTierChanged in Remotes.luau. Recomputed once per Heartbeat alongside the Suspicion
+	value itself, but the signal only actually fires when the tier changes, never every tick.
 ]]
 
 local Players = game:GetService("Players")
@@ -48,6 +77,7 @@ local Constants = Shared.Constants
 
 local Types = require(ReplicatedStorage.Shared.Types.Types)
 type GuardState = Types.GuardState
+type SuspicionTier = Types.SuspicionTier
 
 local RoundService = require(script.Parent.RoundService)
 local EatingService = require(script.Parent.EatingService)
@@ -76,12 +106,24 @@ GuardService.Modes = { "Match" }
 local self = setmetatable({
 	_state = "Reading" :: GuardState,
 	_stateDeadline = 0,
+	-- os.clock() timestamp before which checkForCaughtPlayers is skipped even while Looking —
+	-- see the file doc's "Reaction window". Only ever meaningful while _state == "Looking";
+	-- freshly set at the top of every Reading->Looking flip, so there's no stale-value risk.
+	_lookingDetectionStartClock = 0,
+	-- See the file doc's "Second Look" section for what these two mean and how together they
+	-- make a third consecutive quick look structurally impossible.
+	_pendingSecondLookReading = false,
+	_currentLookIsSecondLook = false,
 	_suspicion = 0,
+	_suspicionTier = "Calm" :: SuspicionTier,
 	_lastNoise = {} :: { [Player]: number },
 	_ragdolledPlayers = {} :: { [Player]: boolean },
 
 	-- (newState: GuardState, oldState: GuardState) -- fired on every Reading<->Looking flip.
 	StateChanged = Shared.Signal.new(),
+	-- (newTier: SuspicionTier, oldTier: SuspicionTier) -- fired only when the tier itself
+	-- changes, never on a fixed interval or every Heartbeat.
+	SuspicionTierChanged = Shared.Signal.new(),
 }, GuardService)
 
 -- Colon-sugar methods would type their implicit `self` from the empty class table, not the
@@ -233,8 +275,50 @@ local function pickLookingDuration(): number
 	return guard.LookingDurationMin + math.random() * (guard.LookingDurationMax - guard.LookingDurationMin)
 end
 
+-- The short Reading that sets up a potential second look — NOT suspicion-scaled (only whether
+-- this roll happens at all is), just a much narrower range than a normal Reading. Floor reuses
+-- ReadingDurationMin so it's still governed by the same "never instant" guarantee.
+local function pickSecondLookReadingDuration(): number
+	local guard = Constants.Guard
+	return guard.ReadingDurationMin + math.random() * (guard.SecondLookReadingMax - guard.ReadingDurationMin)
+end
+
+-- Linear interpolation between BaseChance (at Suspicion 0) and MaxChance (at Suspicion Max) —
+-- see GameConstants.luau. Never 0%, never 100%, by construction.
+local function secondLookChance(suspicion: number): number
+	local guard = Constants.Guard
+	return guard.SecondLookBaseChance + (suspicion / Constants.Suspicion.Max) * (guard.SecondLookMaxChance - guard.SecondLookBaseChance)
+end
+
+local function suspicionTierFor(suspicion: number): SuspicionTier
+	local susp = Constants.Suspicion
+	if suspicion >= susp.HighThreshold then
+		return "High"
+	elseif suspicion >= susp.RisingThreshold then
+		return "Rising"
+	else
+		return "Calm"
+	end
+end
+
+-- Recomputes the qualitative tier from the current (real, server-only) Suspicion value and
+-- fires SuspicionTierChanged ONLY if it actually changed — this is what stops the client-facing
+-- signal from firing every Heartbeat even though this function itself is called every Heartbeat.
+local function refreshSuspicionTier()
+	local newTier = suspicionTierFor(self._suspicion)
+	if newTier == self._suspicionTier then
+		return
+	end
+	local oldTier = self._suspicionTier
+	self._suspicionTier = newTier
+	self.SuspicionTierChanged:Fire(newTier, oldTier)
+end
+
 local function startGuardCycle()
 	self._suspicion = 0
+	self._suspicionTier = "Calm"
+	self._pendingSecondLookReading = false
+	self._currentLookIsSecondLook = false
 	self._state = "Reading"
 	local duration = pickReadingDuration(0)
 	self._stateDeadline = os.clock() + duration
@@ -247,11 +331,42 @@ local function transitionState()
 	local newState: GuardState = if oldState == "Reading" then "Looking" else "Reading"
 	self._state = newState
 
-	local duration = if newState == "Reading" then pickReadingDuration(self._suspicion) else pickLookingDuration()
+	local duration: number
+	if newState == "Looking" then
+		-- Carry forward whether the Reading we're leaving was the short "second look setup" —
+		-- that's what makes THIS Looking phase a second look.
+		self._currentLookIsSecondLook = self._pendingSecondLookReading
+		duration = pickLookingDuration()
+		self._lookingDetectionStartClock = os.clock() + Constants.Guard.LookingReactionWindow
+	else
+		-- newState == "Reading": a Looking phase just ended.
+		if self._currentLookIsSecondLook then
+			-- The Look that just ended WAS a second look — mandatory cooldown: no roll, full
+			-- normal-duration Reading, guaranteed. This is the only thing that needs to be true
+			-- for a third consecutive quick look to be structurally impossible.
+			self._pendingSecondLookReading = false
+			duration = pickReadingDuration(self._suspicion)
+		elseif math.random() < secondLookChance(self._suspicion) then
+			self._pendingSecondLookReading = true
+			duration = pickSecondLookReadingDuration()
+		else
+			self._pendingSecondLookReading = false
+			duration = pickReadingDuration(self._suspicion)
+		end
+	end
+
 	self._stateDeadline = os.clock() + duration
 	setNewspaperPose(newState, true)
 
-	Logger:Info(("Guard %s -> %s (%.1fs, suspicion=%.0f)"):format(oldState, newState, duration, self._suspicion))
+	Logger:Info(
+		("Guard %s -> %s (%.1fs, suspicion=%.0f%s)"):format(
+			oldState,
+			newState,
+			duration,
+			self._suspicion,
+			if self._currentLookIsSecondLook and newState == "Looking" then ", second look" else ""
+		)
+	)
 	self.StateChanged:Fire(newState, oldState)
 end
 
@@ -282,6 +397,8 @@ local function updateSuspicionFromActivity(dt: number)
 	if eatingCount > 0 then
 		addSuspicion(eatingCount * Constants.Suspicion.PerEatingPlayerPerSecond * dt)
 	end
+
+	refreshSuspicionTier()
 end
 
 local function onHeartbeat(dt: number)
@@ -291,7 +408,7 @@ local function onHeartbeat(dt: number)
 
 	updateSuspicionFromActivity(dt)
 
-	if self._state == "Looking" then
+	if self._state == "Looking" and os.clock() >= self._lookingDetectionStartClock then
 		checkForCaughtPlayers()
 	end
 
@@ -321,6 +438,14 @@ local function onPhaseChanged(newPhase: string)
 	elseif newPhase == "Lobby" then
 		self._lastNoise = {}
 		unragdollEveryone()
+		-- onHeartbeat stops touching Suspicion entirely once the phase leaves InProgress (it
+		-- would otherwise sit frozen at whatever it was the instant the round ended, for the
+		-- whole Ended hold plus however long this Lobby wait lasts). Reset it explicitly here
+		-- rather than only at the next round's startGuardCycle, so a client joining DURING this
+		-- Lobby wait — or the border on any client still connected from last round — reads the
+		-- honest current answer ("Calm," nothing is happening) instead of a stale carryover.
+		self._suspicion = 0
+		refreshSuspicionTier()
 	end
 end
 
@@ -343,6 +468,13 @@ end
 -- Server-internal only — never relay this to clients (see the file doc comment).
 function GuardService.GetSuspicion(self: Self): number
 	return self._suspicion
+end
+
+-- Safe to relay to clients — this is already the coarsest form Suspicion comes in (see the file
+-- doc's "Suspicion tier" section). Used by HudReplicationService both for the broadcast on
+-- change and to catch a newly-loaded/late-joining player up to the CURRENT tier immediately.
+function GuardService.GetSuspicionTier(self: Self): SuspicionTier
+	return self._suspicionTier
 end
 
 -- Un-ragdolls a single player immediately rather than waiting for the next Lobby transition —

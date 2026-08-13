@@ -25,6 +25,7 @@
 	targets (2-10 per room); would need a proper expiring index for a much bigger game.
 ]]
 
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 local DataStoreService = game:GetService("DataStoreService")
@@ -46,6 +47,12 @@ local TOPIC = "PublicRoomUpdates"
 local MAX_SEED_ROOMS = 200 -- bound the initial DataStore seed read; see file doc
 
 local publicRoomsStore = DataStoreService:GetDataStore("PublicRooms")
+
+-- Same reasoning as PartyService's partyActionLimiter — CreatePublicRoom reserves a real server
+-- and writes/publishes on every call, and no normal client can double-fire it (HubController
+-- disables the button while a call is in flight), so this only guards against a modified client
+-- calling InvokeServer() directly in a tight loop.
+local roomActionLimiter = Shared.RateLimiter.new(2)
 
 local PublicRoomService = {}
 PublicRoomService.__index = PublicRoomService
@@ -145,6 +152,9 @@ local function seedFromDataStore()
 end
 
 local function onCreatePublicRoom(player: Player): (boolean, string?)
+	if not roomActionLimiter:TryAcquire(player) then
+		return false, "You're doing that too fast — wait a moment and try again."
+	end
 	-- See PartyService.onCreateParty for why this is checked up front, and why the reserve
 	-- call below is wrapped in a timeout rather than a bare pcall.
 	if game.PlaceId == 0 then
@@ -194,6 +204,9 @@ local function onCreatePublicRoom(player: Player): (boolean, string?)
 end
 
 local function onJoinPublicRoom(player: Player, roomIdValue: unknown): (boolean, string?)
+	if not roomActionLimiter:TryAcquire(player) then
+		return false, "You're doing that too fast — wait a moment and try again."
+	end
 	if typeof(roomIdValue) ~= "string" then
 		return false, "Invalid room."
 	end
@@ -212,6 +225,10 @@ local function onJoinPublicRoom(player: Player, roomIdValue: unknown): (boolean,
 	end
 
 	return true, nil
+end
+
+local function onPlayerRemoving(player: Player)
+	roomActionLimiter:Clear(player)
 end
 
 local broadcastAccumulator = 0
@@ -238,6 +255,7 @@ function PublicRoomService.Start(self: Self)
 	CreatePublicRoomFunction.OnServerInvoke = onCreatePublicRoom
 	JoinPublicRoomFunction.OnServerInvoke = onJoinPublicRoom
 	RunService.Heartbeat:Connect(onHeartbeat)
+	Players.PlayerRemoving:Connect(onPlayerRemoving)
 
 	-- Push the seeded cache immediately rather than waiting up to a second for the first
 	-- Heartbeat-throttled broadcast.

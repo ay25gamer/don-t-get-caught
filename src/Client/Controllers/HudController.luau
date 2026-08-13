@@ -30,6 +30,8 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local TeleportService = game:GetService("TeleportService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = require(ReplicatedStorage:WaitForChild("Shared"))
@@ -46,9 +48,12 @@ local Widgets = require(script.Parent.Parent.UI.Widgets)
 type CosmeticItem = typeof(CosmeticCatalog[1])
 
 local SpectatorController = require(script.Parent.SpectatorController)
+local EatingController = require(script.Parent.EatingController)
 
 local RoundStateChangedEvent = Shared.Remotes.GetEvent("RoundStateChanged")
 local EatingStateChangedEvent = Shared.Remotes.GetEvent("EatingStateChanged")
+local GuardStateChangedEvent = Shared.Remotes.GetEvent("GuardStateChanged")
+local SuspicionTierChangedEvent = Shared.Remotes.GetEvent("SuspicionTierChanged")
 local ProfileSnapshotEvent = Shared.Remotes.GetEvent("ProfileSnapshot")
 local UpdateSettingEvent = Shared.Remotes.GetEvent("UpdateSetting")
 local RoundParticipantsEvent = Shared.Remotes.GetEvent("RoundParticipants")
@@ -126,6 +131,70 @@ local function newMeter(parent: Instance, layoutOrder: number, label: string, fi
 	setValue(0)
 
 	return container, setValue
+end
+
+-- "Looking" (existing, unchanged) always wins outright over the ambient tiers below — a vivid,
+-- unmistakable red at a much lower transparency than either amber ever reaches, so the one
+-- signal that means "danger right now" can never be diluted by the merely-ambient one.
+local DANGER_COLOR = Color3.fromRGB(220, 90, 90) -- same red already used for the Noise meter
+local DANGER_VISIBLE_TRANSPARENCY = 0.35
+-- Suspicion ambient tiers (Calm/Rising/High) — a subtle amber tint on the SAME border, used only
+-- while Reading (Looking always overrides). Deliberately much fainter than Looking's red at
+-- every tier — this is atmosphere, not an alarm. Reuses the existing border instead of adding a
+-- new HUD element, so it inherits the same PC/mobile/resolution behavior for free.
+local AMBER_COLOR = Color3.fromRGB(230, 180, 60)
+local RISING_TRANSPARENCY = 0.88
+local HIGH_TRANSPARENCY = 0.72
+local DANGER_SHOW_TWEEN = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local DANGER_HIDE_TWEEN = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+type DangerLevel = "Hidden" | "Rising" | "High" | "Looking"
+
+local DANGER_LEVEL_STYLE: { [DangerLevel]: { Color: Color3, Transparency: number, TweenInfo: TweenInfo } } = {
+	Hidden = { Color = AMBER_COLOR, Transparency = 1, TweenInfo = DANGER_HIDE_TWEEN },
+	Rising = { Color = AMBER_COLOR, Transparency = RISING_TRANSPARENCY, TweenInfo = DANGER_SHOW_TWEEN },
+	High = { Color = AMBER_COLOR, Transparency = HIGH_TRANSPARENCY, TweenInfo = DANGER_SHOW_TWEEN },
+	Looking = { Color = DANGER_COLOR, Transparency = DANGER_VISIBLE_TRANSPARENCY, TweenInfo = DANGER_SHOW_TWEEN },
+}
+
+-- Four thin edge strips forming a full-screen border — a peripheral-vision cue that works no
+-- matter where the player's camera happens to be pointed. This matters because nothing about a
+-- seat's default facing direction guarantees the guard's Newspaper (the only other signal of
+-- Reading/Looking) is actually in view — see GuardStateChanged's doc comment in Remotes.luau.
+-- Returns a setter taking one of the four DangerLevel states above; invisible until first shown,
+-- so it costs nothing to look at while Hidden.
+local function newDangerBorder(screenGui: ScreenGui): (DangerLevel) -> ()
+	local function strip(size: UDim2, position: UDim2): Frame
+		local frame = Instance.new("Frame")
+		frame.Name = "DangerBorder"
+		frame.Size = size
+		frame.Position = position
+		frame.BackgroundColor3 = AMBER_COLOR
+		frame.BackgroundTransparency = 1
+		frame.BorderSizePixel = 0
+		frame.Parent = screenGui
+		return frame
+	end
+
+	local strips = {
+		strip(UDim2.new(1, 0, 0, 8), UDim2.new(0, 0, 0, 0)), -- top
+		strip(UDim2.new(1, 0, 0, 8), UDim2.new(0, 0, 1, -8)), -- bottom
+		strip(UDim2.new(0, 8, 1, 0), UDim2.new(0, 0, 0, 0)), -- left
+		strip(UDim2.new(0, 8, 1, 0), UDim2.new(1, -8, 0, 0)), -- right
+	}
+
+	local currentLevel: DangerLevel = "Hidden"
+
+	return function(level: DangerLevel)
+		if level == currentLevel then
+			return
+		end
+		currentLevel = level
+		local style = DANGER_LEVEL_STYLE[level]
+		for _, frame in ipairs(strips) do
+			TweenService:Create(frame, style.TweenInfo, { BackgroundColor3 = style.Color, BackgroundTransparency = style.Transparency }):Play()
+		end
+	end
 end
 
 --============================================================================
@@ -235,11 +304,25 @@ end
 -- Panels
 --============================================================================
 
+-- The size every panel below is actually laid out at (420x320, see the newFrame call in
+-- createPanel) — on any screen at or above this, FitToAvailableSpace leaves it untouched. On a
+-- phone screen narrower/shorter than this, it shrinks uniformly instead of spilling off-screen
+-- with its Close button unreachable past the edge.
+local PANEL_REFERENCE_SIZE = Vector2.new(420, 320)
+
 local function createPanel(parent: Instance, name: string, title: string): Frame
 	local panel = newFrame(name, parent, UDim2.new(0, 420, 0, 320), UDim2.new(0.5, -210, 0.5, -160), Color3.fromRGB(24, 24, 28))
 	panel.BackgroundTransparency = 0.05
 	panel.Visible = false
 	panel.ZIndex = 10
+
+	local camera = Workspace.CurrentCamera
+	if camera then
+		Widgets.FitToAvailableSpace(panel, PANEL_REFERENCE_SIZE, function()
+			local currentCamera = Workspace.CurrentCamera
+			return if currentCamera then currentCamera.ViewportSize else Vector2.zero
+		end, camera:GetPropertyChangedSignal("ViewportSize"))
+	end
 
 	local titleBar = newFrame("TitleBar", panel, UDim2.new(1, 0, 0, 36))
 	titleBar.ZIndex = 11
@@ -478,6 +561,34 @@ function HudController.Start()
 	screenGui.IgnoreGuiInset = false
 	screenGui.Parent = playerGui
 
+	local setDangerBorderLevel = newDangerBorder(screenGui)
+	local currentGuardState = "Reading"
+	local currentSuspicionTier = "Calm"
+
+	-- Single source of truth for what the border should show right now, re-evaluated whenever
+	-- any of the three inputs changes: outside a round it's always Hidden; Looking always wins
+	-- over the ambient tier; otherwise it reflects the current Suspicion tier. This is also what
+	-- makes "Looking ends -> immediately restores the current tier" correct for free — the
+	-- moment GuardStateChanged reports "Reading" again, this just falls through to whatever
+	-- currentSuspicionTier already is, not whatever it was before Looking started.
+	local function refreshDangerBorder()
+		if phase ~= "InProgress" then
+			setDangerBorderLevel("Hidden")
+			return
+		end
+		if currentGuardState == "Looking" then
+			setDangerBorderLevel("Looking")
+			return
+		end
+		if currentSuspicionTier == "High" then
+			setDangerBorderLevel("High")
+		elseif currentSuspicionTier == "Rising" then
+			setDangerBorderLevel("Rising")
+		else
+			setDangerBorderLevel("Hidden")
+		end
+	end
+
 	-- Top bar: players alive + round status
 	local topBar = newFrame("TopBar", screenGui, UDim2.new(1, 0, 0, 40))
 	local aliveLabel = newLabel("AliveLabel", topBar, "Players Alive: -", UDim2.new(0.3, 0, 1, 0), Enum.TextXAlignment.Left)
@@ -491,9 +602,12 @@ function HudController.Start()
 
 	-- Fixed top-right gear icon — the one entry point into Settings (including Leave Game),
 	-- deliberately pinned to the corner instead of buried in the bottom button row so it's
-	-- always in the same, expected spot regardless of what else the HUD is showing.
-	local settingsIconButton = newButton("SettingsIconButton", screenGui, "\226\154\153", UDim2.new(0, 36, 0, 36))
-	settingsIconButton.Position = UDim2.new(1, -46, 0, 6)
+	-- always in the same, expected spot regardless of what else the HUD is showing. 44x44 (not
+	-- the original 36x36) to clear the ~44pt minimum touch target both Apple's and Google's own
+	-- mobile HIG recommend — this one button isn't part of any FitToAvailableSpace-scaled
+	-- subtree (see below), so shrinking it further on a small screen was never the fix here.
+	local settingsIconButton = newButton("SettingsIconButton", screenGui, "\226\154\153", UDim2.new(0, 44, 0, 44))
+	settingsIconButton.Position = UDim2.new(1, -54, 0, 6)
 	settingsIconButton.TextSize = 20
 	settingsIconButton.ZIndex = 20
 
@@ -501,11 +615,84 @@ function HudController.Start()
 		partyCodeLabel.Text = ("Party Code: %s"):format(code)
 	end)
 
+	-- "Spectating: <name>" + prev/next — visible only while SpectatorController reports
+	-- actively spectating (see SpectateStateChanged below). Sits just below the 40px top bar,
+	-- clear of the alive-count/party-code/status labels living INSIDE that bar, the settings
+	-- gear (top-right corner), and the danger border's own 8px edge strips — nothing else lives
+	-- in this exact spot. SpectatorController remains the sole owner of who's being spectated;
+	-- this only ever displays what it reports, never tracks its own copy of the roster.
+	local SPECTATE_PANEL_REFERENCE_SIZE = Vector2.new(268, 36)
+	local spectatingPanel = newFrame("SpectatingPanel", screenGui, UDim2.new(0, 268, 0, 36), UDim2.new(0.5, -134, 0, 46), Color3.fromRGB(20, 20, 24))
+	spectatingPanel.BackgroundTransparency = 0.25
+	spectatingPanel.Visible = false
+	spectatingPanel.ZIndex = 15
+
+	do
+		local spectateCamera = Workspace.CurrentCamera
+		if spectateCamera then
+			Widgets.FitToAvailableSpace(spectatingPanel, SPECTATE_PANEL_REFERENCE_SIZE, function()
+				local currentCamera = Workspace.CurrentCamera
+				return if currentCamera then currentCamera.ViewportSize else Vector2.zero
+			end, spectateCamera:GetPropertyChangedSignal("ViewportSize"))
+		end
+	end
+
+	local spectatePrevButton = newButton("SpectatePrev", spectatingPanel, "<", UDim2.new(0, 36, 1, 0))
+	spectatePrevButton.ZIndex = 15
+	spectatePrevButton.MouseButton1Click:Connect(function()
+		SpectatorController:CycleTarget(-1)
+	end)
+
+	local spectateLabel = newLabel("SpectateLabel", spectatingPanel, "Spectating...", UDim2.new(0, 188, 1, 0), Enum.TextXAlignment.Center)
+	spectateLabel.Position = UDim2.new(0, 40, 0, 0)
+	spectateLabel.TextSize = 14
+	spectateLabel.ZIndex = 15
+
+	local spectateNextButton = newButton("SpectateNext", spectatingPanel, ">", UDim2.new(0, 36, 1, 0))
+	spectateNextButton.Position = UDim2.new(0, 232, 0, 0)
+	spectateNextButton.ZIndex = 15
+	spectateNextButton.MouseButton1Click:Connect(function()
+		SpectatorController:CycleTarget(1)
+	end)
+
+	SpectatorController.SpectateStateChanged:Connect(function(isSpectating: boolean, target: Player?)
+		spectatingPanel.Visible = isSpectating
+		if isSpectating and target then
+			spectateLabel.Text = ("Spectating: %s"):format(target.Name)
+			spectatePrevButton.Active = true
+			spectateNextButton.Active = true
+		else
+			spectateLabel.Text = "Spectating..."
+			spectatePrevButton.Active = false
+			spectateNextButton.Active = false
+		end
+	end)
+
 	-- Bottom bar: stats/meters row + button row
 	local bottomBar = newFrame("BottomBar", screenGui, UDim2.new(1, 0, 0, 96), UDim2.new(0, 0, 1, -96))
 
+	-- Both rows below are sized "1, -20" of bottomBar, i.e. already-responsive containers — the
+	-- overflow risk is their CHILDREN's fixed pixel widths outgrowing that container on a narrow
+	-- screen, not the row itself. So "available" is measured against the screen (ViewportSize
+	-- minus that same 20px margin), never the row's own AbsoluteSize — see FitToAvailableSpace's
+	-- doc comment in Widgets.luau for why using a target's own AbsoluteSize as the denominator
+	-- would feed back into itself.
+	local camera = Workspace.CurrentCamera
+	local function availableRowSize(): Vector2
+		local currentCamera = Workspace.CurrentCamera
+		if not currentCamera then
+			return Vector2.zero
+		end
+		local viewport = currentCamera.ViewportSize
+		return Vector2.new(viewport.X - 20, viewport.Y)
+	end
+
 	local statsRow = newFrame("StatsRow", bottomBar, UDim2.new(1, -20, 0, 44), UDim2.new(0, 10, 0, 4))
 	statsRow.BackgroundTransparency = 1
+	-- Real content width at Scale 1: 3 labels (110 each) + 2 meters (160 each) + 4 gaps of 18.
+	if camera then
+		Widgets.FitToAvailableSpace(statsRow, Vector2.new(722, 44), availableRowSize, camera:GetPropertyChangedSignal("ViewportSize"))
+	end
 	local statsLayout = Instance.new("UIListLayout")
 	statsLayout.FillDirection = Enum.FillDirection.Horizontal
 	statsLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -525,6 +712,10 @@ function HudController.Start()
 
 	local buttonRow = newFrame("ButtonRow", bottomBar, UDim2.new(1, -20, 0, 40), UDim2.new(0, 10, 0, 52))
 	buttonRow.BackgroundTransparency = 1
+	-- Real content width at Scale 1: 4 buttons (90+90+110+90) + 3 gaps of 10.
+	if camera then
+		Widgets.FitToAvailableSpace(buttonRow, Vector2.new(410, 40), availableRowSize, camera:GetPropertyChangedSignal("ViewportSize"))
+	end
 	local buttonLayout = Instance.new("UIListLayout")
 	buttonLayout.FillDirection = Enum.FillDirection.Horizontal
 	buttonLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -595,6 +786,41 @@ function HudController.Start()
 	spectateButton.MouseButton1Click:Connect(function()
 		SpectatorController:StartSpectating()
 	end)
+
+	-- Floating "Fast Eating" toggle — explicit and easy to flip back, per design: this button is
+	-- the ONLY way the requested mode changes (never a held key, so it works identically on
+	-- touch and desktop). Sits just above the bottom bar rather than inside StatsRow/ButtonRow
+	-- so it doesn't disturb their FitToAvailableSpace content-size math above. Only meaningful
+	-- while actually eating, so it's hidden outside InProgress the same way reviveButton/
+	-- startButton are (see RoundStateChangedEvent below).
+	local fastModeButton = newButton("FastModeButton", screenGui, "Fast Eating: OFF", UDim2.new(0, 150, 0, 30))
+	fastModeButton.Position = UDim2.new(0, 10, 1, -132)
+	fastModeButton.BackgroundColor3 = Color3.fromRGB(120, 60, 60)
+	fastModeButton.TextSize = 14
+	fastModeButton.Visible = false
+
+	local fastModeEnabled = false
+	local function refreshFastModeButton()
+		fastModeButton.Text = if fastModeEnabled then "Fast Eating: ON" else "Fast Eating: OFF"
+		fastModeButton.BackgroundColor3 = if fastModeEnabled then Color3.fromRGB(70, 165, 90) else Color3.fromRGB(120, 60, 60)
+	end
+	refreshFastModeButton()
+
+	fastModeButton.MouseButton1Click:Connect(function()
+		fastModeEnabled = not fastModeEnabled
+		refreshFastModeButton()
+		EatingController:SetFastModeEnabled(fastModeEnabled)
+	end)
+
+	-- "CAUGHT" banner — shares every show/hide trigger with reviveButton below (see each site),
+	-- so the two always appear and disappear together and can never desync. Sits directly above
+	-- the revive button so both read as one connected message rather than two separate ones.
+	local caughtBanner = newLabel("CaughtBanner", screenGui, "CAUGHT", UDim2.new(0, 240, 0, 32), Enum.TextXAlignment.Center)
+	caughtBanner.Position = UDim2.new(0.5, -120, 0.55, -38)
+	caughtBanner.TextColor3 = Color3.fromRGB(220, 90, 90)
+	caughtBanner.TextSize = 24
+	caughtBanner.Visible = false
+	caughtBanner.ZIndex = 20
 
 	-- Floating "Revive" — hidden unless the LOCAL player is currently eliminated, so it's
 	-- front-and-center the moment it's actually usable instead of buried in the Shop's generic
@@ -719,7 +945,17 @@ function HudController.Start()
 			-- A fresh round means everyone still connected is freshly seated and alive again —
 			-- hide any stale revive prompt from the previous round.
 			reviveButton.Visible = false
+			caughtBanner.Visible = false
+			fastModeButton.Visible = true
+		else
+			fastModeButton.Visible = false
 		end
+		-- Outside an active round, neither "the guard is Looking" nor a Suspicion tier means
+		-- anything — refreshDangerBorder already forces Hidden whenever phase ~= "InProgress",
+		-- rather than trusting whatever GuardStateChanged/SuspicionTierChanged last happened to
+		-- say (they only fire on a change, not once per round, so they'd otherwise sit stale
+		-- between rounds).
+		refreshDangerBorder()
 		if phase == "Intermission" then
 			statusLabel.Text = ("Starting in %ds"):format(math.max(0, math.floor(secondsRemaining)))
 		elseif phase == "Lobby" then
@@ -729,10 +965,21 @@ function HudController.Start()
 				statusLabel.Text = "Waiting for the host to start..."
 			end
 			reviveButton.Visible = false
+			caughtBanner.Visible = false
 		elseif phase == "Ended" then
 			statusLabel.Text = "Round over"
 		end
 		refreshStartButton()
+	end)
+
+	GuardStateChangedEvent.OnClientEvent:Connect(function(guardState: string)
+		currentGuardState = guardState
+		refreshDangerBorder()
+	end)
+
+	SuspicionTierChangedEvent.OnClientEvent:Connect(function(tier: string)
+		currentSuspicionTier = tier
+		refreshDangerBorder()
 	end)
 
 	RoundParticipantsEvent.OnClientEvent:Connect(function(participants: { Player })
@@ -745,6 +992,7 @@ function HudController.Start()
 		aliveLabel.Text = ("Players Alive: %d"):format(aliveCount)
 		if caughtPlayer == LocalPlayer then
 			reviveButton.Visible = true
+			caughtBanner.Visible = true
 		end
 	end)
 
@@ -753,6 +1001,7 @@ function HudController.Start()
 		aliveLabel.Text = ("Players Alive: %d"):format(aliveCount)
 		if revivedPlayer == LocalPlayer then
 			reviveButton.Visible = false
+			caughtBanner.Visible = false
 		end
 	end)
 

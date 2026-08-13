@@ -8,16 +8,27 @@
 	directly on the replicated seat parts — no remote needed for that, ordinary Workspace
 	instance replication does it for free.
 
-	Noise: every accepted bite adds a fixed amount to the player's OWN noise meter (visible to
-	them individually — see design doc's "Noise System"). A bite request that arrives before
-	BiteInterval has elapsed still makes noise (the fork clanks against the plate) but doesn't
-	count toward food progress — spam-clicking doesn't make you eat faster, it just makes you
-	louder. Noise decays passively over time. This is per-player only; aggregating everyone's
-	noise into the guard's suspicion meter is GuardService's job, not this one's.
+	Noise: every accepted bite adds an amount to the player's OWN noise meter (visible to them
+	individually — see design doc's "Noise System") that depends on their requested eating mode
+	(see below). A bite request that arrives before its mode's required interval has elapsed
+	still makes noise (the fork clanks against the plate) but doesn't count toward food progress
+	— spam-clicking doesn't make you eat faster, it just makes you louder. Noise decays passively
+	over time. This is per-player only; aggregating everyone's noise into the guard's suspicion
+	meter is GuardService's job, not this one's.
 
 	Reacts to SeatingService.PlayerSeated (not RoundService.RoundStarted) to reset a player's
 	food/noise state — RoundStarted fires to every listening service in an unspecified order,
 	so waiting for "this player is actually seated" is the only ordering-safe hook.
+
+	Eating Speed (Safe/Fast): RequestBite now carries a requested EatingMode ("Safe" or "Fast",
+	see Shared/Types/Types.luau) — the ONLY thing the client ever supplies about speed. This
+	module alone maps that mode to the real numbers (BITE_INTERVAL_BY_MODE / NOISE_PER_BITE_BY_MODE
+	below) and re-validates the claimed mode itself (an unrecognized value is just dropped).
+	Switching which mode is claimed on successive calls can't be used to bite faster than Fast's
+	own interval allows: every attempt is gated against the SAME shared _lastBiteClock using
+	ITS OWN claimed mode's required interval, so the fastest any sequence of claims can ever
+	achieve is Fast's own rate — there is no combination of Safe/Fast claims that beats always
+	claiming Fast outright.
 ]]
 
 local Players = game:GetService("Players")
@@ -29,10 +40,38 @@ local Shared = require(ReplicatedStorage:WaitForChild("Shared"))
 local Logger = Shared.Logger.new("EatingService")
 local Constants = Shared.Constants
 
+local Types = require(ReplicatedStorage.Shared.Types.Types)
+type EatingMode = Types.EatingMode
+
 local RoundService = require(script.Parent.RoundService)
 local SeatingService = require(script.Parent.SeatingService)
 
 local RequestBiteEvent = Shared.Remotes.GetEvent("RequestBite")
+
+-- The required interval since the last COUNTED bite, and the noise a counted bite costs, per
+-- requested mode. Fast's noise reuses Noise.SpamNoiseMultiplier rather than a new invented
+-- number — see GameConstants.luau's Eating.FastBiteInterval doc comment for why.
+local BITE_INTERVAL_BY_MODE: { [EatingMode]: number } = {
+	Safe = Constants.Eating.BiteInterval,
+	Fast = Constants.Eating.FastBiteInterval,
+}
+local NOISE_PER_BITE_BY_MODE: { [EatingMode]: number } = {
+	Safe = Constants.Noise.BaseBiteNoise,
+	Fast = Constants.Noise.BaseBiteNoise * Constants.Noise.SpamNoiseMultiplier,
+}
+
+-- BITE_INTERVAL_BY_MODE already rate-limits how often a click COUNTS toward food progress, but
+-- that check only lives inside onRequestBite's own logic — it does nothing to stop the REMOTE
+-- itself from being invoked far faster than any real click/tap could (a modified client calling
+-- RequestBiteEvent:FireServer() directly, bypassing EatingController's own Heartbeat pacing).
+-- Every invocation, even ones rejected as "too soon," still does real work: a table write plus
+-- a NoiseChanged Signal:Fire() that fans out to GuardService (suspicion math) and
+-- HudReplicationService (a FireClient network send) — so an unthrottled flood is both a real
+-- CPU/bandwidth cost and a way to grief the whole round by spiking the guard's (global, shared)
+-- suspicion meter on demand. 0.1s is far below even Fast's interval, so no legitimate input
+-- pattern (mouse, touch, or otherwise) in either mode can ever hit it — this only ever rejects
+-- calls no real client input could produce.
+local requestBiteLimiter = Shared.RateLimiter.new(0.1)
 
 local FOOD_TWEEN_INFO = TweenInfo.new(Constants.Eating.BiteInterval * 0.8, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local FORK_TWEEN_INFO =
@@ -142,13 +181,24 @@ local function onPhaseChanged(newPhase: string)
 	end
 end
 
-local function onRequestBite(player: Player)
+local function onRequestBite(player: Player, modeValue: unknown)
+	if not requestBiteLimiter:TryAcquire(player) then
+		return
+	end
 	if RoundService:GetPhase() ~= "InProgress" then
 		return
 	end
 	if not RoundService:IsPlayerAlive(player) then
 		return
 	end
+
+	-- The client only ever ASKS for "Safe" or "Fast" — never a numeric interval/noise value.
+	-- Anything else is either a bug in a legitimate client (which only ever sends one of these
+	-- two) or a modified one; either way, there is nothing safe to fall back to, so just drop it.
+	if modeValue ~= "Safe" and modeValue ~= "Fast" then
+		return
+	end
+	local mode = modeValue :: EatingMode
 
 	local seatModel = SeatingService:GetSeatForPlayer(player)
 	if not seatModel then
@@ -160,30 +210,42 @@ local function onRequestBite(player: Player)
 		return
 	end
 
+	local requiredInterval = BITE_INTERVAL_BY_MODE[mode]
 	local now = os.clock()
 	local elapsedSinceLastBite = now - (self._lastBiteClock[player] or 0)
 
-	if elapsedSinceLastBite < Constants.Eating.BiteInterval then
-		-- Spam click: the fork clanks against the plate, but it's too soon to count as a bite.
+	if elapsedSinceLastBite < requiredInterval then
+		-- Spam click (or a modified client claiming Fast faster than even Fast allows): the
+		-- fork clanks against the plate, but it's too soon to count as a bite. Always the
+		-- universal spam rate, regardless of claimed mode — see the file doc for why
+		-- alternating claims can't be used to beat Fast's own interval.
 		setNoise(player, Constants.Noise.BaseBiteNoise * Constants.Noise.SpamNoiseMultiplier)
 		return
 	end
 
 	self._lastBiteClock[player] = now
-	self._eatingUntilClock[player] = now + Constants.Eating.BiteInterval
+	self._eatingUntilClock[player] = now + requiredInterval
 	local biteCount = (self._biteCount[player] or 0) + 1
 	self._biteCount[player] = biteCount
 
 	local percent = math.min(Constants.Eating.FullPercent, (biteCount / Constants.Eating.BitesToFinish) * Constants.Eating.FullPercent)
 	self._foodPercent[player] = percent
 
-	setNoise(player, Constants.Noise.BaseBiteNoise)
+	setNoise(player, NOISE_PER_BITE_BY_MODE[mode])
 	playBiteVisuals(seatModel, percent)
 	self.FoodPercentChanged:Fire(player, percent)
 
 	if percent >= Constants.Eating.FullPercent then
 		Logger:Info(("%s finished eating."):format(player.Name))
 		self.PlayerFinishedEating:Fire(player)
+
+		-- First to reach FullPercent wins the round outright — see RoundService.luau's file
+		-- doc on PlayerCompletedFood. `percent` above was computed entirely server-side from
+		-- this player's own tracked _biteCount; nothing about "did I finish" is ever taken from
+		-- the client. RoundService re-validates phase/alive itself too (same defense-in-depth
+		-- as every other cross-service call in this codebase), so calling this unconditionally
+		-- here is safe even in an edge case where the round somehow already ended a frame ago.
+		RoundService:PlayerCompletedFood(player)
 	end
 end
 
@@ -200,6 +262,7 @@ local function onHeartbeat(dt: number)
 end
 
 local function onPlayerRemoving(player: Player)
+	requestBiteLimiter:Clear(player)
 	self._foodPercent[player] = nil
 	self._biteCount[player] = nil
 	self._lastBiteClock[player] = nil

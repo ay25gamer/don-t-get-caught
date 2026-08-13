@@ -117,14 +117,17 @@ local DEFAULT_DATA: PlayerProfileData = {
 
 	Inventory = {
 		OwnedCosmetics = {},
+		-- Must match real CosmeticCatalog.luau ids (e.g. "Fork_Default"), not a bare "Default" —
+		-- ShopService/SkinVisualsService/HudController all resolve these via findItem(id) against
+		-- the catalog, which only matches on the catalog's actual Id strings.
 		EquippedCosmetics = {
-			Fork = "Default",
-			Plate = "Default",
-			Chair = "Default",
-			Food = "Default",
+			Fork = "Fork_Default",
+			Plate = "Plate_Default",
+			Chair = "Chair_Default",
+			Food = "Food_Default",
 			Emotes = {},
 			Title = "",
-			VictoryAnimation = "Default",
+			VictoryAnimation = "Victory_Default",
 		},
 		FavoriteCosmetic = "",
 	},

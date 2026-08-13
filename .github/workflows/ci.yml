@@ -1,0 +1,59 @@
+name: CI
+
+# Minimal validation gate: does the Rojo project still build, and does every --!strict
+# module still pass Luau's own strict type checker? Nothing else — no tests exist yet
+# (see the repo audit), so this is deliberately the smallest useful check, not a full
+# pipeline. Tool versions below are pinned to match rokit.toml exactly, so what CI runs
+# is always the same toolchain a contributor gets locally via `rokit install`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    name: Rojo build + Luau strict analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installed by hand (curl + unzip) rather than via a third-party "install my
+      # toolchain" Action, so the only external dependency this workflow has is the
+      # official actions/checkout — everything else is a direct, verifiable download
+      # from the same GitHub releases rokit.toml already pins.
+      - name: Install Rojo (pinned in rokit.toml)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL -o rojo.zip "https://github.com/rojo-rbx/rojo/releases/download/v7.6.1/rojo-7.6.1-linux-x86_64.zip"
+          unzip -q rojo.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/rojo"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install luau-lsp (pinned in rokit.toml)
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL -o luau-lsp.zip "https://github.com/JohnnyMorganz/luau-lsp/releases/download/1.69.0/luau-lsp-linux-x86_64.zip"
+          unzip -q luau-lsp.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/luau-lsp"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: rojo build
+        run: rojo build default.project.json --output build.rbxl
+
+      - name: rojo sourcemap
+        run: rojo sourcemap default.project.json --output sourcemap.json
+
+      - name: Fetch Roblox type definitions (same luau-lsp version as above)
+        run: curl -sSfL -o globalTypes.d.luau "https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/1.69.0/scripts/globalTypes.d.luau"
+
+      # src/Server/Packages is vendored, unmodified third-party code (ProfileStore) with
+      # no --!strict header of its own — the README has never claimed it passes strict
+      # analysis, only the first-party src/ tree does, so it's excluded here to match.
+      - name: luau-lsp analyze (--!strict)
+        run: >-
+          luau-lsp analyze
+          --sourcemap=sourcemap.json
+          --definitions:@roblox=globalTypes.d.luau
+          --ignore="src/Server/Packages/**"
+          src
