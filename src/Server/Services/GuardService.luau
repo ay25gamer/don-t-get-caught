@@ -62,6 +62,12 @@
 	the real number — see Constants.Suspicion.RisingThreshold/HighThreshold and
 	SuspicionTierChanged in Remotes.luau. Recomputed once per Heartbeat alongside the Suspicion
 	value itself, but the signal only actually fires when the tier changes, never every tick.
+
+	Round-to-round escalation (replayability, see GameConstants.luau's Guard.MaxEscalationRounds/
+	EscalationStrength): the READING ceiling compresses a little further with each round
+	RoundService reports as completed on this server, plateauing after MaxEscalationRounds. This
+	is entirely independent of and applied before Suspicion's own per-Reading compression — a
+	persistent per-server nudge, not a Suspicion change. See escalatedReadingDurationMax below.
 ]]
 
 local Players = game:GetService("Players")
@@ -261,11 +267,25 @@ local function checkForCaughtPlayers()
 	end
 end
 
+-- Round-to-round escalation (replayability) — see GameConstants.luau's
+-- Guard.MaxEscalationRounds/EscalationStrength doc comment. A persistent nudge on the READING
+-- ceiling, applied before Suspicion's own per-Reading compression below narrows it further.
+-- ReadingDurationMin is never touched here, and this has no effect on LookingDuration, the
+-- Second Look chance, or pickSecondLookReadingDuration (which uses SecondLookReadingMax, not
+-- this).
+local function escalatedReadingDurationMax(): number
+	local guard = Constants.Guard
+	local roundsCompleted = RoundService:GetRoundsCompletedThisServer()
+	local escalation = math.min(guard.MaxEscalationRounds, roundsCompleted) / guard.MaxEscalationRounds
+	return guard.ReadingDurationMax - (guard.ReadingDurationMax - guard.ReadingDurationMin) * guard.EscalationStrength * escalation
+end
+
 local function pickReadingDuration(suspicion: number): number
 	local guard = Constants.Guard
 	local susp = Constants.Suspicion
-	local range = guard.ReadingDurationMax - guard.ReadingDurationMin
-	local compressedMax = guard.ReadingDurationMax - range * (suspicion / susp.Max) * susp.ReadingDurationInfluence
+	local readingDurationMax = escalatedReadingDurationMax()
+	local range = readingDurationMax - guard.ReadingDurationMin
+	local compressedMax = readingDurationMax - range * (suspicion / susp.Max) * susp.ReadingDurationInfluence
 	compressedMax = math.max(guard.ReadingDurationMin, compressedMax)
 	return guard.ReadingDurationMin + math.random() * (compressedMax - guard.ReadingDurationMin)
 end

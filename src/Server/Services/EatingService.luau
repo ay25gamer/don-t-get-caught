@@ -253,10 +253,21 @@ local function onRequestBite(player: Player, modeValue: unknown)
 	end
 end
 
+-- Non-linear decay rate for THIS instant, from the player's current meal progress — see
+-- GameConstants.luau's Noise.DecayEarlyMultiplier/DecayLateMultiplier doc comment. Only the
+-- passive decay below uses this; bite noise amounts (BITE_INTERVAL_BY_MODE/NOISE_PER_BITE_BY_MODE)
+-- and the spam-click noise cost are entirely untouched by meal progress.
+local function decayRateFor(player: Player): number
+	local progress = math.clamp((self._foodPercent[player] or 0) / Constants.Eating.FullPercent, 0, 1)
+	local multiplier = Constants.Noise.DecayEarlyMultiplier
+		+ (Constants.Noise.DecayLateMultiplier - Constants.Noise.DecayEarlyMultiplier) * progress
+	return Constants.Noise.DecayPerSecond * multiplier
+end
+
 local function onHeartbeat(dt: number)
 	for player, noise in pairs(self._noise) do
 		if noise > 0 then
-			local updated = math.max(0, noise - Constants.Noise.DecayPerSecond * dt)
+			local updated = math.max(0, noise - decayRateFor(player) * dt)
 			if updated ~= noise then
 				self._noise[player] = updated
 				self.NoiseChanged:Fire(player, updated)

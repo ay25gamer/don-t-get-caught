@@ -54,6 +54,11 @@ local self = setmetatable({
 	_roundStartClock = nil :: number?,
 	_endedDeadline = nil :: number?,
 	_lastTickSecond = nil :: number?,
+	-- How many rounds have reached "Ended" on THIS server since it booted — never reset by
+	-- players leaving/joining, only by the server itself restarting (see transitionTo's "Ended"
+	-- branch, the single place this increments). Server-only: read by GuardService for round-to-
+	-- round escalation (replayability); never sent to any client.
+	_roundsCompletedThisServer = 0,
 
 	-- (newPhase: RoundPhase, oldPhase: RoundPhase)
 	PhaseChanged = Shared.Signal.new(),
@@ -122,6 +127,10 @@ local function transitionTo(newPhase: RoundPhase, forcedWinner: Player?)
 		self.RoundStarted:Fire(participants)
 	elseif newPhase == "Ended" then
 		self._endedDeadline = os.clock() + Constants.Round.EndedDisplayDuration
+		-- transitionTo is the sole place any phase change happens (every RequestStart/
+		-- PlayerCompletedFood/max-duration/last-survivor path above funnels through here), so
+		-- this fires exactly once per round reaching Ended — never double-counted, never skipped.
+		self._roundsCompletedThisServer += 1
 
 		local winner: Player? = forcedWinner
 		if not winner and self._aliveCount == 1 then
@@ -294,6 +303,12 @@ end
 
 function RoundService.GetPhase(self: Self): RoundPhase
 	return self._phase
+end
+
+-- Server-only — see the field's own comment above. Currently read by GuardService for round-to-
+-- round escalation; nothing here should ever route this to a client.
+function RoundService.GetRoundsCompletedThisServer(self: Self): number
+	return self._roundsCompletedThisServer
 end
 
 function RoundService.IsPlayerAlive(self: Self, player: Player): boolean

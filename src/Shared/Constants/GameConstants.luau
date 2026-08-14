@@ -47,6 +47,15 @@ GameConstants.Guard = {
 	SecondLookReadingMax = 1.5, -- floor reuses ReadingDurationMin above; only the ceiling shrinks
 	SecondLookBaseChance = 0.05, -- chance to trigger at Suspicion 0 — never truly zero
 	SecondLookMaxChance = 0.35, -- chance to trigger at Suspicion Max — never a guarantee
+
+	-- Round-to-round escalation (replayability): ReadingDurationMax compresses a little further
+	-- with each round completed on THIS server, capped at MaxEscalationRounds so a long-running
+	-- server never spirals past a fixed ceiling. This is a separate, persistent nudge applied to
+	-- the ceiling BEFORE Suspicion's own per-Reading compression (ReadingDurationInfluence,
+	-- above) narrows the range further — see GuardService.luau's pickReadingDuration. Never
+	-- touches ReadingDurationMin, LookingDuration, or the Second Look chance/duration.
+	MaxEscalationRounds = 8, -- rounds completed this server before escalation plateaus
+	EscalationStrength = 0.25, -- fraction of the (Max - Min) range shaved off the ceiling at the plateau
 }
 
 -- The GUARD's global suspicion meter — invisible to players (see design doc). Distinct from
@@ -82,7 +91,13 @@ GameConstants.Noise = {
 	Max = 100,
 	BaseBiteNoise = 12, -- added to a player's own noise meter per valid, well-timed bite
 	SpamNoiseMultiplier = 2.5, -- multiplier applied instead when a bite request arrives before BiteInterval has elapsed — spam-clicking makes noise but doesn't speed up eating
-	DecayPerSecond = 18, -- how fast a player's noise meter drains per second while they aren't generating noise
+	DecayPerSecond = 18, -- pivot decay rate; see DecayEarlyMultiplier/DecayLateMultiplier below for how the EFFECTIVE rate scales with meal progress
+	-- Non-linear decay curve: noise drains slower early in a meal (a noisy start lingers) and
+	-- faster near the end (finishing up lets a player go quiet fast), interpolated linearly by
+	-- (foodPercent / FullPercent) — see EatingService.luau's onHeartbeat. At 0% progress:
+	-- DecayPerSecond * 0.6 = 10.8/s. At 100%: DecayPerSecond * 1.5 = 27/s.
+	DecayEarlyMultiplier = 0.6,
+	DecayLateMultiplier = 1.5,
 }
 
 GameConstants.DataStore = {
